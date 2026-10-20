@@ -1,0 +1,10 @@
+{
+  "name": "espkvm-check",
+  "private": true,
+  "description": "check.espkvm.io: counts the ESP-KVM devices in use",
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "node --test test/worker.test.mjs",
+    "deploy": "wrangler deploy"
+  }
+}
