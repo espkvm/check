@@ -42,7 +42,7 @@ test("a device counts once a day, once a month", async () => {
   await worker.fetch(post(`id=${ID}&board=funcev&ver=v.0.67.0`), env);
   assert.equal(DB.writes(), 1);
   /* an earlier month: this id is then not new in this one */
-  DB.db.exec(`INSERT INTO seen VALUES ('2000-01','${ID}','funcev','v1','2000-01-01','2000-01-01')`);
+  DB.db.exec(`INSERT INTO seen (month, id, board, ver, first, last) VALUES ('2000-01','${ID}','funcev','v1','2000-01-01','2000-01-01')`);
   await worker.fetch(post(`id=${"f".repeat(32)}&board=p4-eth&ver=v.0.67.0`), env);
   const s = await worker.fetch(
     new Request("https://check.espkvm.io/v1/stats", { headers: { Authorization: "Bearer t" } }),
@@ -62,4 +62,61 @@ test("junk is refused, stats need the token", async () => {
   const s = await worker.fetch(new Request("https://check.espkvm.io/v1/stats"), env);
   assert.equal(s.status, 401);
   assert.equal((await worker.fetch(new Request("https://check.espkvm.io/"), env)).status, 404);
+});
+
+test("growth by first day, a daily snapshot of the last 30 days", async () => {
+  const DB = fakeD1();
+  const env = { DB, STATS_TOKEN: "t" };
+  const [a, b, c, d] = ["a", "b", "c", "d"].map((x) => x.repeat(32));
+  DB.db.exec(`INSERT INTO seen (month, id, board, ver, first, last) VALUES
+    ('2026-09','${a}','funcev','v.0.60.0','2026-09-10','2026-09-20'),
+    ('2026-10','${a}','funcev','v.0.68.0','2026-10-02','2026-10-28'),
+    ('2026-10','${b}','p4-eth','v.0.68.0','2026-10-02','2026-10-02'),
+    ('2026-10','${c}','p4-eth','v.0.73.0','2026-10-27','2026-10-29'),
+    ('2026-09','${d}','p4-nano','v.0.60.0','2026-09-05','2026-09-29')`);
+  await worker.scheduled({ scheduledTime: Date.parse("2026-10-29T23:55:00Z") }, env);
+  await worker.scheduled({ scheduledTime: Date.parse("2026-10-29T23:56:00Z") }, env); /* a rerun replaces */
+  const s = await worker.fetch(
+    new Request("https://check.espkvm.io/v1/stats", { headers: { Authorization: "Bearer t" } }),
+    env,
+  );
+  const body = await s.json();
+  assert.deepEqual(body.growth, [
+    { day: "2026-09-05", new: 1, total: 1 },
+    { day: "2026-09-10", new: 1, total: 2 },
+    { day: "2026-10-02", new: 1, total: 3 },
+    { day: "2026-10-27", new: 1, total: 4 },
+  ]);
+  /* d was last seen on 09-29, and the window starts on 09-30 */
+  const get = (kind, key) => body.daily.find((r) => r.kind === kind && r.key === key)?.devices;
+  assert.equal(get("all", ""), 3);
+  assert.equal(get("board", "p4-eth"), 2);
+  assert.equal(get("ver", "v.0.68.0"), 2);
+  assert.equal(get("ver", "v.0.60.0"), undefined); /* a's latest row wins */
+  assert.equal(get("rev", "3.x"), 1); /* funcev */
+  assert.equal(get("rev", "1.x"), 2);
+  assert.equal(body.daily.length, 1 + 2 + 2 + 2);
+});
+
+test("the chip revision: exact when sent, else the family by board", async () => {
+  const DB = fakeD1();
+  const env = { DB, STATS_TOKEN: "t" };
+  const ids = ["a", "b", "c", "d", "e"].map((c) => c.repeat(32));
+  /* an old console: no rev, and junk is dropped, not refused */
+  assert.equal((await worker.fetch(post(`id=${ids[0]}&board=p4-eth&ver=v1`), env)).status, 204);
+  assert.equal((await worker.fetch(post(`id=${ids[1]}&board=p4-eth-rev3&ver=v1&rev=junk`), env)).status, 204);
+  await worker.fetch(post(`id=${ids[2]}&board=funcev&ver=v1`), env);
+  await worker.fetch(post(`id=${ids[3]}&board=p4-nano-rev3&ver=v1&rev=3.1`), env);
+  await worker.fetch(post(`id=${ids[4]}&board=p4-eth&ver=v1&rev=1.3`), env);
+  /* a later report without rev keeps the one known */
+  DB.db.exec(`UPDATE seen SET last = '2000-01-01' WHERE id = '${ids[3]}'`);
+  await worker.fetch(post(`id=${ids[3]}&board=p4-nano-rev3&ver=v2`), env);
+  const s = await worker.fetch(
+    new Request("https://check.espkvm.io/v1/stats", { headers: { Authorization: "Bearer t" } }),
+    env,
+  );
+  const body = await s.json();
+  const revs = Object.fromEntries(body.revisions.map((r) => [r.rev, r.devices]));
+  assert.deepEqual(revs, { "3.x": 2, "1.x": 1, "3.1": 1, "1.3": 1 });
+  assert.equal(body.months.at(-1).devices, 5);
 });

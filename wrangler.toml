@@ -9,3 +9,7 @@ routes = [{ pattern = "check.espkvm.io", custom_domain = true }]
 binding = "DB"
 database_name = "espkvm-check"
 database_id = "18c2fffa-77ab-4aeb-bdf5-f237bcbbb019"
+
+# The daily snapshot (src/index.js, snapshot), just before midnight UTC.
+[triggers]
+crons = ["55 23 * * *"]
