@@ -95,7 +95,63 @@ test("growth by first day, a daily snapshot of the last 30 days", async () => {
   assert.equal(get("ver", "v.0.60.0"), undefined); /* a's latest row wins */
   assert.equal(get("rev", "3.x"), 1); /* funcev */
   assert.equal(get("rev", "1.x"), 2);
-  assert.equal(body.daily.length, 1 + 2 + 2 + 2);
+  /* all, 2 boards, 2 versions, 2 families, 1 channel (v1-style tags are dev) + the totals */
+  assert.equal(get("channel", "release"), 3);
+  assert.equal(get("total", ""), 4);
+  assert.equal(get("new", ""), 0);
+  assert.equal(get("active1", ""), 1); /* c */
+  assert.equal(get("active7", ""), 2); /* a, c */
+  assert.equal(get("lost", ""), 1); /* d: last seen 09-29, 30 days before */
+  assert.equal(body.daily.length, 1 + 2 + 2 + 2 + 1 + 5);
+});
+
+test("changes are kept, and the first report of a day goes to GA", async () => {
+  const DB = fakeD1();
+  const sent = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (sent.push({ url, body: JSON.parse(init.body) }), new Response(null, { status: 204 }));
+  try {
+    const waits = [];
+    const ctx = { waitUntil: (p) => waits.push(p) };
+    const mine = "e".repeat(32);
+    const env = { DB, STATS_TOKEN: "t", GA_MEASUREMENT_ID: "G-TEST", GA_API_SECRET: "s", INTERNAL_IDS: `x, ${mine}` };
+    await worker.fetch(post(`id=${ID}&board=p4-eth&ver=v.0.82.0&rev=1.3`), env, ctx);
+    await worker.fetch(post(`id=${ID}&board=p4-eth&ver=v.0.82.0&rev=1.3`), env, ctx); /* same day: nothing */
+    DB.db.exec(`UPDATE seen SET last = '2000-01-01'`);
+    await worker.fetch(post(`id=${ID}&board=p4-eth-rev3&ver=v.0.83.0-dirty`), env, ctx);
+    await worker.fetch(post(`id=${mine}&board=jetkvm-mini&ver=v.0.83.0`), env, ctx); /* counted, not sent */
+    await Promise.all(waits);
+    assert.equal(sent.length, 2);
+    assert.match(sent[0].url, /measurement_id=G-TEST&api_secret=s$/);
+    const [first, second] = sent.map((s) => s.body);
+    assert.equal(first.client_id, second.client_id);
+    assert.notEqual(first.client_id, ID);
+    assert.deepEqual(first.events.map((e) => e.name), ["device_seen", "device_new"]);
+    assert.equal(first.events[0].params.family, "1.x");
+    assert.equal(first.events[0].params.channel, "release");
+    assert.equal(first.events[0].params.engagement_time_msec, 1);
+    assert.deepEqual(second.events.map((e) => e.name), ["device_seen", "device_updated", "device_board_changed"]);
+    assert.equal(second.events[1].params.from_ver, "v.0.82.0");
+    assert.equal(second.events[0].params.rev, "1.3"); /* kept from before */
+    assert.equal(second.user_properties.u_channel.value, "dev");
+    const s = await worker.fetch(
+      new Request("https://check.espkvm.io/v1/stats", { headers: { Authorization: "Bearer t" } }),
+      env,
+    );
+    const changes = (await s.json()).changes.map((c) => [c.field, c.old, c.new]);
+    assert.deepEqual(changes.sort(), [["board", "p4-eth", "p4-eth-rev3"], ["ver", "v.0.82.0", "v.0.83.0-dirty"]]);
+    /* the cron sends the totals as one event, not as a device */
+    waits.length = 0;
+    sent.length = 0;
+    await worker.scheduled({ scheduledTime: Date.now() }, env, ctx);
+    await Promise.all(waits);
+    assert.equal(sent[0].body.client_id, "espkvm-check.daily");
+    assert.equal(sent[0].body.events[0].name, "devices_daily");
+    assert.equal(sent[0].body.events[0].params.total, 2);
+    assert.equal(sent[0].body.events[0].params.engagement_time_msec, undefined);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test("the chip revision: exact when sent, else the family by board", async () => {

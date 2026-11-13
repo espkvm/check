@@ -13,3 +13,8 @@ database_id = "18c2fffa-77ab-4aeb-bdf5-f237bcbbb019"
 # The daily snapshot (src/index.js, snapshot), just before midnight UTC.
 [triggers]
 crons = ["55 23 * * *"]
+
+# Google Analytics 4, property "ESP-KVM devices", stream check-worker. The API
+# secret and INTERNAL_IDS are secrets: npx wrangler@4 secret put GA_API_SECRET
+[vars]
+GA_MEASUREMENT_ID = "G-FDRR5RFCQ4"
