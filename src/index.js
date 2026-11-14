@@ -12,7 +12,8 @@
  * Google Analytics through the Measurement Protocol, as a view of the numbers
  * (D1 stays the record): device_seen / device_new / device_updated /
  * device_board_changed for the first report of a day, and devices_daily from
- * the cron with the totals. The client id is a hash of the installId, so GA
+ * the cron with the totals, plus version_daily per version line (ver_line,
+ * ver_devices: devices seen in 30 days). The client id is a hash of the installId, so GA
  * and D1 rows do not join up. Ids in INTERNAL_IDS (comma separated, a secret:
  * the author's bench devices) are counted in D1 but never sent.
  *
@@ -35,13 +36,15 @@ const FAMILY = `CASE WHEN rev <> '' THEN rev
 
 /* A tagged release, v.0.83.0; anything else (-dirty, git describe, a fork) is dev. */
 const RELEASE = /^v\.\d+\.\d+\.\d+$/;
+/* The release line of a version: v.0.83.1 and v.0.83.0-dirty are both 0.83. */
+const lineOf = (ver) => /^v\.(\d+\.\d+)\./.exec(ver)?.[1] ?? "other";
 const channelOf = (ver) => (RELEASE.test(ver) ? "release" : "dev");
 const familyOf = (board, rev) =>
   rev ? `${rev.split(".")[0]}.x` : board.endsWith("-rev3") || REV3_BOARDS.includes(board) ? "3.x" : "1.x";
 
 export default {
-  /* For scripts/seed-ga.mjs: the same client id and labels as the Worker's. */
-  helpers: { clientId: (id) => clientId(id), channelOf, familyOf },
+  /* For scripts/seed-ga.mjs and backfill-versions.mjs: the same client id and labels as the Worker's. */
+  helpers: { clientId: (id) => clientId(id), channelOf, familyOf, lineOf },
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (url.pathname === "/v1/seen" && req.method === "POST") return seen(url, env, ctx);
@@ -50,8 +53,14 @@ export default {
   },
   async scheduled(event, env, ctx) {
     const day = new Date(event.scheduledTime).toISOString().slice(0, 10);
-    const totals = await snapshot(env, day);
-    ctx?.waitUntil(ga(env, "espkvm-check.daily", [{ name: "devices_daily", params: totals }]));
+    const { totals, lines } = await snapshot(env, day);
+    /* And one event per version line, for a chart of each line growing and
+       shrinking. A request carries at most 25 events. */
+    const events = [{ name: "devices_daily", params: totals }];
+    for (const [line, n] of lines) events.push({ name: "version_daily", params: { ver_line: line, ver_devices: n } });
+    for (let i = 0; i < events.length; i += 25) {
+      ctx?.waitUntil(ga(env, "espkvm-check.daily", events.slice(i, i + 25)));
+    }
   },
 };
 
@@ -69,7 +78,10 @@ async function snapshot(env, day) {
       .all()
   ).results;
   const counts = new Map([["all\t", rows.length]]);
+  const lines = new Map();
   for (const r of rows) {
+    const line = lineOf(r.ver);
+    lines.set(line, (lines.get(line) ?? 0) + 1);
     for (const k of [`board\t${r.board}`, `ver\t${r.ver}`, `rev\t${r.rev}`, `channel\t${channelOf(r.ver)}`]) {
       counts.set(k, (counts.get(k) ?? 0) + 1);
     }
@@ -106,7 +118,7 @@ async function snapshot(env, day) {
       .bind(day, kind, key, n)
       .run();
   }
-  return totals;
+  return { totals, lines };
 }
 
 async function seen(url, env, ctx) {

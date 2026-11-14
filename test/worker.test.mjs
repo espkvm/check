@@ -149,6 +149,9 @@ test("changes are kept, and the first report of a day goes to GA", async () => {
     assert.equal(sent[0].body.events[0].name, "devices_daily");
     assert.equal(sent[0].body.events[0].params.total, 2);
     assert.equal(sent[0].body.events[0].params.engagement_time_msec, undefined);
+    /* and the version lines: v.0.83.0-dirty counts as 0.83 */
+    const lines = sent[0].body.events.filter((e) => e.name === "version_daily").map((e) => e.params);
+    assert.deepEqual(lines.sort((a, b) => a.ver_line.localeCompare(b.ver_line)), [{ ver_line: "0.83", ver_devices: 2 }]);
   } finally {
     globalThis.fetch = realFetch;
   }
